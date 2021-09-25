@@ -1,0 +1,510 @@
+---
+title: "Final HW 4"
+author: "Janna M"
+date: "9/25/2021"
+output: html_document
+---
+
+```{r}
+library(devtools)
+library(tidyverse)
+library(patchwork)
+library(dplyr)
+library(tidycovid19)
+library(BBmisc)
+library(scales)
+library(collapse)
+```
+```{r}
+install_github("joachim-gassen/tidycovid19")
+
+```
+
+```{r}
+merged <- download_merged_data(cached = TRUE) 
+```
+
+```{r}
+
+download_jhu_csse_covid19_data()
+```
+
+
+```{r}
+download_wbank_data()
+```
+
+```{r}
+merged <- download_merged_data(cached = TRUE)
+merged <- merged %>% group_by(country, iso3c) %>%
+  arrange(country, iso3c, date) %>%
+  ## code to drop recovered
+  ##select(-recovered) %>%
+  ##code to replace NAs with zeros
+  mutate(
+    confirmed = ifelse(is.na(confirmed), 0, confirmed),
+    deaths = ifelse(is.na(deaths), 0, deaths),
+    recovered = ifelse(is.na(recovered),0, recovered)) %>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1),
+    daily_recovered = recovered - lag(recovered, n = 1)) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0),
+    daily_recovered = replace_na(daily_recovered,0)) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+
+add_world1 <- merged %>% group_by(date) %>%
+  arrange(date) %>%
+  summarize(
+    country = "World",
+    iso3c = NA,
+    confirmed = sum(confirmed, na.rm = TRUE),
+    deaths = sum(deaths, na.rm = TRUE),
+    recovered = sum(recovered, na.rm = TRUE),
+    timestamp = fmode(timestamp)) %>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1),
+    daily_recovered = recovered - lag(recovered, n = 1)) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0),
+    daily_recovered = replace_na(daily_recovered,0)) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+  
+add_world2 <- merged %>% group_by(country, iso3c) %>%
+  summarize(
+    population = fmode(population),
+    land_area_skm = fmode(land_area_skm),
+    timestamp = fmode(timestamp)) %>%
+  ungroup() %>%
+  summarize(
+    country = "World", iso3c = NA,
+    population = sum(population, na.rm = TRUE),
+    land_area_skm = sum(land_area_skm, na.rm = TRUE)) %>%
+  mutate(pop_density = population / land_area_skm)
+```
+
+
+```{r}
+
+add_world <- left_join(add_world1, add_world2, by = c("country", "iso3c"))
+merged <- bind_rows(merged, add_world)
+
+cv_data <- pivot_longer(merged,
+    cols=c("confirmed", "deaths","recovered",
+    "daily_confirmed", "daily_deaths","daily_recovered"),
+    names_to = "variable", values_to = "cases"
+  ) %>%
+  arrange(country, variable, date) %>%
+  rename(area = land_area_skm, density = pop_density) %>%
+  mutate(rate = cases / population * 10^6) %>%
+  ## code to omit data after 2021-07-01
+  filter(date < "2021-07-01")
+
+rm(list=c("merged", "add_world", "add_world1", "add_world2"))
+```
+
+
+
+```{r}
+
+cv_summary <- function(d, country_list = "World",
+  plot = TRUE, facet = "country",
+  status = c("confirmed", "deaths")){
+  # based on `wes_palettes()` color schemes GrandBudapest1, IsleofDogs1,
+  # IsleofDogs2 from the {wesanderson} package
+  my_palette <- c("#5B1A18", "#FD6467", "#F1BB7B",
+    "#D67236", "#0F0D0E", "#9986A5", "#79402E",
+    "#CCBA72", "#D9D0D3", "#8D8680", "#EAD3BF",
+    "#AA9486", "#B6854D", "#39312F", "#1C1718")
+  
+  if (facet == "country"){
+    fill <- "variable"
+    n <- length(unique(d$variable)) / 2
+    # need only half of unique # of variables (3)
+  }
+
+  if (facet == "variable"){
+    fill <- "country"
+    n <- length(country_list)
+    # need number of countries
+  }
+  
+  if ("All" %in% country_list) {
+    country_list <- unique(d$country)
+    country_list <- setdiff(country_list, "World")
+  }
+
+  if ("World" %in% country_list) {
+    d <- d %>% filter(country %in% country_list)
+
+    totals <- d %>% group_by(variable) %>%
+      summarize(
+        country = "World",
+        cases = max(cases),
+        population = max(population),
+        area = max(area),
+        density = max(density),
+        rate = max(rate, na.rm = TRUE),
+        on = max(date)
+      ) %>%
+      select(country, variable, cases, population, area, density, rate, on) %>%
+      arrange(variable) %>%
+      ungroup()
+  }
+  
+  if ("World" %nin% country_list) {
+    d <- d %>% filter(country %in% country_list)
+    totals <- d %>% group_by(country, variable) %>%
+      summarize(
+        cases = max(cases),
+        population = max(population),
+        area = max(area),
+        density = max(density),
+        rate = max(rate, na.rm = TRUE),
+        on = max(date),
+        gdp_capita = fmode(gdp_capita),
+        income = fmode(income),
+        life_expectancy = fmode(life_expectancy),
+        max_sd = max(soc_dist),
+        max_mr = max(mov_rest)
+      ) %>%
+      select(country, variable, cases, population, area, density, rate,
+        gdp_capita, income, life_expectancy, max_sd, max_mr, on) %>%
+      arrange(country, variable) %>%
+      ungroup()
+  }
+  
+  if (plot == TRUE){
+    cc <- filter(d, variable %in% status)
+    cum_cases_plot <- ggplot(
+      data = cc,
+        # use the tidy evaluation pronoun .data to slice the chosen fill
+        # variable from the data frame
+        aes(x = date, y = cases + 1, color = .data[[fill]],
+          fill = .data[[fill]])) +
+      geom_point(size = 0.5) +
+      geom_line() +
+      # use the tidy evaluation pronoun .data to slice the chosen facet_wrap
+      # variable from the data frame
+      facet_wrap(~ .data[[facet]], ncol = 4, scales = "free_y") +
+      xlab("Date") + ylab("Log Cumulative Cases") +
+      scale_y_log10(
+        breaks = trans_breaks("log10", function(x) 10^x),
+        labels = trans_format("log10", math_format(10^.x))) +
+      scale_color_manual(aesthetics = c("color", "fill"),
+        name = NULL, values = my_palette)
+
+    dc <- filter(d, variable %in% paste0("daily_", status))
+    daily_cases_plot <- ggplot(
+      data = dc,
+        aes(x = date, y = cases, color = .data[[fill]],
+          fill = .data[[fill]])) +
+      geom_point(size = 0.5) +
+      geom_line() +
+      facet_wrap(~ .data[[facet]], ncol = 4, scales = "free_y") +
+      xlab("Date") + ylab("Daily Cases") +
+      scale_color_manual(aesthetics = c("color", "fill"),
+        name = NULL, values = my_palette)
+  }
+
+  if (plot == TRUE) {
+    return(list(totals = totals,
+      cum_cases_plot = cum_cases_plot,
+      daily_cases_plot = daily_cases_plot)
+    )
+  } else {  
+    return(list(totals = totals))
+  }
+}
+```
+Challange 1
+
+Use the dataset and function generated above to plot global data on confirmed coronavirus infections, deaths, and recoveries.
+
+HINT: To do this, you will want to look at the various arguments of the function and its defaults, as well as at the structure of the data object returned by the function.
+
+```{r}
+#Global Confirmed cases 
+cv_summary(cv_data, status = c("confirmed", "deaths", "recovered"))
+```
+CHALLENGE 2:
+Use the dataset and function generated above to plot data on confirmed coronavirus infections, deaths, and recoveries for the following seven countries: the United States, the United Kingdom, Germany, South Africa, China, Russia, Iran, and India. Facet your plots first by “country” and then by “variable.”
+```{r}
+cv_summary(cv_data, status = c("confirmed", "deaths", "recovered"),
+country_list = c("United States", "United Kingdom", "Germany", "South Africa", "China", "Russia", "Iran","India"))
+```
+
+CHALLENGE 3:
+Use the dataset and function generated above to return summary data for ALL countries in the dataset, and then filter this returned dataset to only those countries with populations of over one million, storing this dataset as a tibble d. How many countries does this tibble include?
+
+
+```{r}
+cv_summary <- function(d, country_list = "World",
+plot = TRUE, facet = "country",
+status = c("confirmed", "deaths")){
+# based on `wes_palettes()` color schemes GrandBudapest1, IsleofDogs1,
+# IsleofDogs2 from the {wesanderson} package
+my_palette <- c("#5B1A18", "#FD6467", "#F1BB7B",
+"#D67236", "#0F0D0E", "#9986A5", "#79402E",
+"#CCBA72", "#D9D0D3", "#8D8680", "#EAD3BF",
+"#AA9486", "#B6854D", "#39312F", "#1C1718")
+  
+if (facet == "country"){
+fill <- "variable"
+n <- length(unique(d$variable)) / 2
+# need only half of unique # of variables (3)
+}
+
+if (facet == "variable"){
+fill <- "country"
+n <- length(country_list)
+# need number of countries
+}
+  
+if ("All" %in% country_list) {
+country_list <- unique(d$country)
+country_list <- setdiff(country_list, "World")
+}
+
+if ("World" %in% country_list) {
+d <- d %>% filter(country %in% country_list)
+
+totals <- d %>% group_by(variable) %>%
+summarize(
+country = "World",
+cases = max(cases),
+population = max(population),
+area = max(area),
+density = max(density),
+rate = max(rate, na.rm = TRUE),
+on = max(date)
+) %>%
+select(country, variable, cases, population, area, density, rate, on) %>%
+arrange(variable) %>%
+ungroup()
+}
+  
+if ("World" %nin% country_list) {
+d <- d %>% filter(country %in% country_list)
+totals <- d %>% group_by(country, variable) %>%
+summarize(
+cases = max(cases),
+population = max(population),
+area = max(area),
+density = max(density),
+rate = max(rate, na.rm = TRUE),
+on = max(date),
+gdp_capita = fmode(gdp_capita),
+income = fmode(income),
+life_expectancy = fmode(life_expectancy),
+max_sd = max(soc_dist),
+max_mr = max(mov_rest)
+) %>%
+select(country, variable, cases, population, area, density, rate,
+gdp_capita, income, life_expectancy, max_sd, max_mr, on) %>%
+arrange(country, variable) %>%
+ungroup() %>%
+filter(population > 1000000)
+}
+  
+if (plot == TRUE){
+cc <- filter(d, variable %in% status)
+cum_cases_plot <- ggplot(
+data = cc,
+# use the tidy evaluation pronoun .data to slice the chosen fill
+# variable from the data frame
+aes(x = date, y = cases + 1, color = .data[[fill]],
+fill = .data[[fill]])) +
+geom_point(size = 0.5) +
+geom_line() +
+# use the tidy evaluation pronoun .data to slice the chosen facet_wrap
+# variable from the data frame
+facet_wrap(~ .data[[facet]], ncol = 4, scales = "free_y") +
+xlab("Date") + ylab("Log Cumulative Cases") +
+scale_y_log10(
+breaks = trans_breaks("log10", function(x) 10^x),
+labels = trans_format("log10", math_format(10^.x))) +
+scale_color_manual(aesthetics = c("color", "fill"),
+name = NULL, values = my_palette)
+
+dc <- filter(d, variable %in% paste0("daily_", status))
+daily_cases_plot <- ggplot(
+data = dc,
+aes(x = date, y = cases, color = .data[[fill]],
+fill = .data[[fill]])) +
+geom_point(size = 0.5) +
+geom_line() +
+facet_wrap(~ .data[[facet]], ncol = 4, scales = "free_y") +
+xlab("Date") + ylab("Daily Cases") +
+scale_color_manual(aesthetics = c("color", "fill"),
+name = NULL, values = my_palette)
+}
+
+if (plot == TRUE) {
+return(list(totals = totals,
+cum_cases_plot = cum_cases_plot,
+daily_cases_plot = daily_cases_plot)
+)
+} else {  
+return(totals)
+}
+}
+```
+
+```{r}
+#creating a vector of all countries
+all_countries <- c(unique(cv_data$country))
+all_countries <- all_countries[all_countries != "World"]
+d <- cv_summary(cv_data, plot = FALSE, country_list = all_countries)
+head(d)
+```
+The tibble includes 155 countries
+
+CHALLENGE 4:
+Filter d to generate two additional tibbles, overall and daily that include only data on the variables “confirmed” and “daily_confirmed” cases, respectively. Depending on the dataset, the case and rate variables either reflect the overall (i.e., across the pandemic) or maximum daily number of cases and number of cases recorded per million people in the population.
+
+Which 5 countries have experienced the highest overall rate of confirmed cases?
+Which 5 countries have experienced the highest single-day rate of confirmed cases?
+Which 5 countries have experienced the highest overall total of confirmed cases?
+Which 5 countries have experienced the highest single-day total of confirmed cases?
+
+```{r}
+#overall 
+overall <- d%>%
+filter(variable == "confirmed") %>%
+mutate(overall_rate = cases / 1000000 )
+overall
+```
+
+```{r}
+# Top 5 countries with highest overall rate of confirmed cases
+overall%>%
+arrange(desc(overall_rate))%>%
+top_n(5)
+
+```
+
+```{r}
+#Top 5 countries with highest overall total of confirmed cases
+overall%>%
+arrange(desc(cases))%>%
+top_n(5)
+```
+
+```{r}
+#daily
+daily <-  d%>%
+filter(variable == "daily_confirmed") %>%
+mutate(daily_rate = cases / 1000000 )
+daily
+```
+
+```{r}
+#Top 5 countries with highest single-day rate of confirmed cases
+daily%>%
+arrange(desc(daily_rate))%>%
+top_n(5)
+```
+```{r}
+#Top 5 countries with highest single-day rate of confirmed cases
+daily%>%
+arrange(desc(cases))%>%
+top_n(5)
+```
+
+
+
+CHALLENGE 5:
+Run a multivariate linear model to evaluate how the overall infection rate (rate) is related to the variables population density (density), population size (population), gross domestic product per capita (gdp_capita), and overall income level (income); do not worry about including interaction terms.
+
+In doing so, you should run exploratory visualizations to see whether or not the four numeric variables (i.e., all but income) should be transformed.
+
+NOTE: There are two countries that are missing gdp_capita values. You will need to filter these out of your datasets in order to be able to complete the upcoming challenges!
+
+Based on the full model, what predictors variables have slopes significantly different from zero?
+```{r}
+d2 <- d%>%
+filter(gdp_capita != is.na(gdp_capita))
+library(ggplot2)
+ggplot(d2, aes(x = log(density), y = log(rate))) +
+geom_point() +
+geom_smooth(method = "lm", formula = y ~ x) +
+ggtitle("Relationship Between Infection Rate and  Population Density")
+
+```
+```{r}
+#transform 
+library(ggplot2)
+ggplot(d2, aes(x = log(population), y = log(rate))) +
+geom_point() +
+geom_smooth(method = "lm", formula = y ~ x) +
+ggtitle("Relationship Between infection Rate and Population Size")
+```
+```{r}
+#transform population 
+library(ggplot2)
+ggplot(d2, aes(x = log(gdp_capita), y = log(rate))) +
+geom_point() +
+geom_smooth(method = "lm", formula = y ~ x) +
+ggtitle("Relation Between infection Rate and Gdp_Capita")
+```
+
+```{r}
+#transform GDP capita 
+d2 <- na.omit(d2)
+model <- lm(log1p(rate) ~ log1p(density) + log1p(population) + log1p(gdp_capita) + income, data = d2)
+summary(model)
+```
+
+The features Log of density, Log of population, and Income level Low has p-value less than 0.05 so they are statistically significant. 
+
+
+CHALLENGE 6:
+Run stepwise selection using AIC to evaluate whether the full model or a nested, simpler model is preferred. What is the best model (based on AIC) of the possible ones involving these 4 predictors? What are the “pseudo- 
+R2” values associated with the full and “best” models?
+
+HINT: Check out Module 22 on module selection using AIC with the {MASS} package and Module 24 on calculating “pseudo- 
+R2 ” values with {MuMIn}.
+
+Repeat this modeling process to evaluate what combination of explanatory variables best predicts maximum daily infection rate. Are the important predictors the same? What additional or different variables are included?
+```{r}
+# Stepwise regression model
+library(MASS)
+step.model <- stepAIC(model, direction = "both", 
+trace = FALSE)
+step.model$anova
+```
+The  simple model with population and income is the best model.
+```{r}
+model2 <- lm(log1p(rate) ~ log1p(population) + log1p(gdp_capita) + income, data = d2)
+summary(model2) 
+```
+The simple model with population and income is the best model.The r-squared value is 0.1386.
+
+
+CHALLENGE 7:
+To the best model you determined in CHALLENGE 6 for predicting the maximum daily infection rate, add in the maximum social distancing (max_sd) and maximum movement restriction (max_mr) score per country. Do either of these additional variables improve the model significantly?
+
+HINT: Again, you should run exploratory visualizations to see whether or max_sd and max_mr should be transformed… they should be! You will want to consider using the log1p() rather than log() function to do your transformation as there are a couple of countries for which the value of max_sd is zero and log(0) is undefined. Alternatively, you could filter those two countries from your dataset.
+```{r}
+library(ggplot2)
+ggplot(d2, aes(x = log1p(max_sd), y = log10(rate))) +
+geom_point() +
+geom_smooth(method = "lm", formula = y ~ x) +
+ggtitle("Relation Between  Maximum Social distancing and  Gdp_Capita")
+
+```
+
+```{r}
+library(ggplot2)
+ggplot(d2, aes(x = log1p(max_mr), y = log10(rate))) +
+geom_point() +
+geom_smooth(method = "lm", formula = y ~ x) +
+ggtitle("Relation Betwenn Maximum Movement Restriction and  Gdp_Capita")
+```
